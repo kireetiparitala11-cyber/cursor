@@ -1,0 +1,276 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Backend Tests and Build
+  backend:
+    runs-on: ubuntu-latest
+    
+    services:
+      mongodb:
+        image: mongo:6.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: backend/package-lock.json
+    
+    - name: Install Backend Dependencies
+      run: |
+        cd backend
+        npm ci
+    
+    - name: Run Backend Tests
+      run: |
+        cd backend
+        npm test
+      env:
+        NODE_ENV: test
+        MONGODB_URI: mongodb://localhost:27017/lead-scoring-test
+        JWT_SECRET: test-secret
+    
+    - name: Build Backend
+      run: |
+        cd backend
+        npm run build
+    
+    - name: Upload Backend Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: backend-build
+        path: backend/
+
+  # Frontend Tests and Build
+  frontend:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+    
+    - name: Install Frontend Dependencies
+      run: |
+        cd frontend
+        npm ci
+    
+    - name: Run Frontend Tests
+      run: |
+        cd frontend
+        npm test -- --coverage --watchAll=false
+    
+    - name: Run Frontend Lint
+      run: |
+        cd frontend
+        npm run lint
+    
+    - name: Build Frontend
+      run: |
+        cd frontend
+        npm run build
+      env:
+        REACT_APP_API_URL: ${{ secrets.REACT_APP_API_URL }}
+    
+    - name: Upload Frontend Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: frontend-build
+        path: frontend/build/
+
+  # Mobile Build (Android)
+  mobile-android:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: mobile/package-lock.json
+    
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+    
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+    
+    - name: Install Mobile Dependencies
+      run: |
+        cd mobile
+        npm ci
+    
+    - name: Run Mobile Tests
+      run: |
+        cd mobile
+        npm test -- --coverage --watchAll=false
+    
+    - name: Build Android APK
+      run: |
+        cd mobile
+        npm run build:android
+      env:
+        REACT_APP_API_URL: ${{ secrets.REACT_APP_API_URL }}
+    
+    - name: Upload Android APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-apk
+        path: mobile/android/app/build/outputs/apk/release/
+
+  # Mobile Build (iOS) - Only on macOS
+  mobile-ios:
+    runs-on: macos-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: mobile/package-lock.json
+    
+    - name: Install Mobile Dependencies
+      run: |
+        cd mobile
+        npm ci
+    
+    - name: Install iOS Dependencies
+      run: |
+        cd mobile/ios
+        pod install
+    
+    - name: Build iOS App
+      run: |
+        cd mobile
+        npm run build:ios
+      env:
+        REACT_APP_API_URL: ${{ secrets.REACT_APP_API_URL }}
+    
+    - name: Upload iOS Build
+      uses: actions/upload-artifact@v4
+      with:
+        name: ios-build
+        path: mobile/ios/build/
+
+  # Deploy to Staging
+  deploy-staging:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download Backend Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: backend-build
+        path: backend/
+    
+    - name: Download Frontend Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: frontend-build
+        path: frontend/build/
+    
+    - name: Deploy to Vercel (Frontend)
+      uses: amondnet/vercel-action@v25
+      with:
+        vercel-token: ${{ secrets.VERCEL_TOKEN }}
+        vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+        vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+        working-directory: frontend/
+    
+    - name: Deploy to Firebase (Backend)
+      uses: FirebaseExtended/action-hosting-deploy@v0
+      with:
+        repoToken: '${{ secrets.GITHUB_TOKEN }}'
+        firebaseServiceAccount: '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}'
+        projectId: ${{ secrets.FIREBASE_PROJECT_ID }}
+        channelId: staging
+
+  # Deploy to Production
+  deploy-production:
+    needs: [backend, frontend, mobile-android, mobile-ios]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download Backend Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: backend-build
+        path: backend/
+    
+    - name: Download Frontend Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: frontend-build
+        path: frontend/build/
+    
+    - name: Deploy to Vercel (Frontend)
+      uses: amondnet/vercel-action@v25
+      with:
+        vercel-token: ${{ secrets.VERCEL_TOKEN }}
+        vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+        vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+        working-directory: frontend/
+    
+    - name: Deploy to Firebase (Backend)
+      uses: FirebaseExtended/action-hosting-deploy@v0
+      with:
+        repoToken: '${{ secrets.GITHUB_TOKEN }}'
+        firebaseServiceAccount: '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}'
+        projectId: ${{ secrets.FIREBASE_PROJECT_ID }}
+        channelId: live
+    
+    - name: Create GitHub Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v${{ github.run_number }}
+        release_name: Release v${{ github.run_number }}
+        body: |
+          ## Lead Scoring Platform Release v${{ github.run_number }}
+          
+          ### Changes
+          - Automated deployment from main branch
+          
+          ### Downloads
+          - Android APK: Download from artifacts
+          - iOS Build: Download from artifacts
+        draft: false
+        prerelease: false
